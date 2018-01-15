@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/Keiwi/client"
-	"github.com/Keiwi/utils"
 	"github.com/apex/log"
+	"github.com/keiwi/client"
+	"github.com/keiwi/utils"
 )
 
 var Version string

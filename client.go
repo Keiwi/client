@@ -7,8 +7,8 @@ import (
 
 	"encoding/json"
 
-	"github.com/Keiwi/utils"
 	"github.com/apex/log"
+	"github.com/keiwi/utils"
 )
 
 var (
