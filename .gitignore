@@ -3,3 +3,5 @@ logs/
 
 /bin/
 !/bin/run.*
+
+vendor/

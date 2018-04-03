@@ -1,0 +1,9 @@
+{
+  "interval": 10,
+  "log_dir": "./logs",
+  "log_level": "info",
+  "log_syntax": "%date%_server.log",
+  "server_ip": "192.168.1.192:4444",
+  "password": "123",
+  "certificate_path": "D:/ssh/server.crt"
+}

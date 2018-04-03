@@ -13,5 +13,5 @@ func main() {
 		Dirname: "./logs",
 		Logname: "%date%_client.log",
 	})
-	client.Start(Version)
+	client.Start()
 }

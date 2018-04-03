@@ -1,110 +1,164 @@
 package client
 
 import (
-	"io"
-	"net"
-	"strings"
-
+	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net"
+	"os"
+	"strings"
+	"time"
 
-	"github.com/apex/log"
+	"github.com/keiwi/client/commands"
 	"github.com/keiwi/utils"
+	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 )
 
 var (
-	version string
-	updater UpdateService
+	configType     string
+	conn           net.Conn
+	commandHandler *commands.CommandHandler
 )
 
-// ErrorResponse is the struct when sending a simple error back
-type ErrorResponse struct {
-	Error string `json:"error"`
+// Start will start the whole client process
+func Start() {
+	ReadConfig()
+
+	utils.Log.Info("Initializing all of the commands")
+	commandHandler = commands.NewCommandHandler()
+
+	utils.Log.Info("Starting keiwi Monitor Client")
+
+	utils.Log.Info("Starting discovery server")
+	go StartDiscovery()
+
+	utils.Log.Info("Starting to connect to server")
+	Connect()
 }
 
-// StartTCPServer starts a TCP server and waits for requests
-func StartTCPServer(connIP, connPort, connType string) {
-	tcp, err := net.Listen(connType, connIP+":"+connPort)
-	if err != nil {
-		utils.Log.WithField("error", err).Fatal("Error listening on TCP")
+// ReadConfig will try to find the config and read, if config file
+// does not exists it will create one with default options
+func ReadConfig() {
+	configType = os.Getenv("KeiwiConfigType")
+	if configType == "" {
+		configType = "json"
+	}
+	viper.SetConfigType(configType)
+
+	viper.SetConfigFile("config." + configType)
+	viper.AddConfigPath(".")
+
+	viper.SetDefault("log_dir", "./logs")
+	viper.SetDefault("log_syntax", "%date%_server.log")
+	viper.SetDefault("log_level", "info")
+
+	viper.SetDefault("server_ip", "")
+	viper.SetDefault("password", "")
+	viper.SetDefault("interval", 600)
+	viper.SetDefault("certificate_path", "./server.crt")
+
+	if err := viper.ReadInConfig(); err != nil {
+		utils.Log.Debug("Config file not found, saving default")
+		if err = viper.WriteConfigAs("config." + configType); err != nil {
+			utils.Log.WithField("error", err.Error()).Fatal("Can't save default config")
+		}
 	}
 
-	// Close the tcp request when done
-	defer tcp.Close()
+	level := strings.ToLower(viper.GetString("log_level"))
+	utils.Log = utils.NewLogger(utils.NameToLevel[level], &utils.LoggerConfig{
+		Dirname: viper.GetString("log_dir"),
+		Logname: viper.GetString("log_syntax"),
+	})
+}
 
-	utils.Log.WithFields(log.Fields{
-		"IP":   connIP,
-		"Port": connPort,
-	}).Info("Started listening for TCP requests")
+func Connect() {
+	caCert, err := ioutil.ReadFile(viper.GetString("certificate_path"))
+	if err != nil {
+		utils.Log.WithField("error", err.Error()).Fatal("Can't read pem file")
+		return
+	}
+
+	certPool := x509.NewCertPool()
+	certPool.AppendCertsFromPEM(caCert)
+
+	conf := &tls.Config{
+		RootCAs: certPool,
+	}
+
 	for {
-		// Wait for incoming requests
-		conn, err := tcp.Accept()
+		con, err := tls.Dial("tcp", viper.GetString("server_ip"), conf)
 		if err != nil {
-			utils.Log.WithField("error", err).Error("Error accepting TCP request")
-			return
-		}
+			utils.Log.WithField("ip", viper.GetString("server_ip")).WithError(err).Error("can't connect to server")
 
-		// Take care of the request in a gorotuine
-		go handleRequest(conn)
+			utils.Log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
+			time.Sleep(time.Second * time.Duration(viper.GetInt("interval")))
+			continue
+		}
+		utils.Log.WithField("IP", con.RemoteAddr().String()).Info("connected to the server")
+		conn = con
+
+		utils.Log.Info("Initializing the handshake")
+		err = Handshake(conn)
+		if err != nil {
+			utils.Log.WithError(err).Error("handshake failed")
+
+			utils.Log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
+			time.Sleep(time.Second * time.Duration(viper.GetInt("interval")))
+			continue
+		}
+		utils.Log.Info("Handshake successful")
+
+		for {
+			r := bufio.NewReader(conn)
+			msg, err := r.ReadString('\n')
+			if err != nil {
+				utils.Log.WithField("error", err).Error("error reading TLS message")
+				break
+			}
+
+			cmd := commands.ParseCommand(msg)
+			out := commandHandler.RunCommand(cmd)
+
+			data := ""
+			if out.Error() != "" {
+				data = `{"error": "` + out.Error() + `"}`
+			} else {
+				b, err := json.Marshal(out.Message())
+				if err != nil {
+					data = `{"error": "` + err.Error() + `"}`
+				} else {
+					data = `{"message": ` + string(b) + `}`
+				}
+			}
+
+			_, err = fmt.Fprintln(conn, data)
+			if err != nil {
+				utils.Log.WithError(err).Error("error writing TLS message")
+				continue
+			}
+		}
 	}
 }
 
-// Start starts the whole client, takes care of the config,
-// starts the TCP server etc.
-func Start(v string) {
-	version = v
-	utils.Log.WithField("Version", version).Info("Starting MSTT-Monitor client")
-
-	updater = UpdateService{
-		Version:    version,
-		Identifier: "mstt-client-windows-",
-	}
-
-	StartTCPServer("0.0.0.0", "3333", "tcp")
-}
-
-// handleRequest handles the incoming TCP requests,
-// parses the command and responds to the request
-func handleRequest(conn io.ReadWriteCloser) {
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+func Handshake(conn net.Conn) error {
+	_, err := fmt.Fprintln(conn, viper.GetString("password"))
 	if err != nil {
-		if err.Error() == "EOF" {
-			return
-		}
-		utils.Log.WithField("error", err).Error("Error reading TCP request")
-		return
-	}
-	cmd := ParseCommand(string(buf[:n]))
-
-	var resp interface{}
-
-	switch strings.ToLower(cmd.Name) {
-	case "check_memory":
-		resp = MemoryCheck(cmd)
-	case "check_disc":
-		resp = DiscCheck(cmd)
-	case "check_cpu":
-		resp = CPUCheck(cmd)
-	case "uptime":
-		resp = UptimeCheck(cmd)
-	case "info":
-		resp = InfoCheck(cmd)
-	case "file":
-		resp = FileCheck(cmd)
-	case "update":
-		resp = UpdateCheck(cmd)
-	case "netusage":
-		resp = NetworkCheck(cmd)
-	default:
-		resp = ErrorResponse{Error: "Unknown command"}
+		return err
 	}
 
-	respBody, err := json.Marshal(resp)
+	r := bufio.NewReader(conn)
+	accepted, err := r.ReadString('\n')
 	if err != nil {
-		utils.Log.WithField("error", err).Error("Error parsing respBody")
-		return
+		return errors.Wrap(err, "connection disconnected")
 	}
+	accepted = strings.TrimSpace(accepted)
 
-	conn.Write(respBody)
-	conn.Close()
+	if accepted != "accepted" {
+		return errors.New("invalid password")
+	}
+	return nil
 }
