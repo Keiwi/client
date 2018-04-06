@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/keiwi/client/commands"
-	"github.com/keiwi/utils"
+	"github.com/keiwi/utils/log"
+	"github.com/keiwi/utils/log/handlers/cli"
+	"github.com/keiwi/utils/log/handlers/file"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 )
@@ -28,15 +30,15 @@ var (
 func Start() {
 	ReadConfig()
 
-	utils.Log.Info("Initializing all of the commands")
+	log.Info("Initializing all of the commands")
 	commandHandler = commands.NewCommandHandler()
 
-	utils.Log.Info("Starting keiwi Monitor Client")
+	log.Info("Starting keiwi Monitor Client")
 
-	utils.Log.Info("Starting discovery server")
+	log.Info("Starting discovery server")
 	go StartDiscovery()
 
-	utils.Log.Info("Starting to connect to server")
+	log.Info("Starting to connect to server")
 	Connect()
 }
 
@@ -62,23 +64,23 @@ func ReadConfig() {
 	viper.SetDefault("certificate_path", "./server.crt")
 
 	if err := viper.ReadInConfig(); err != nil {
-		utils.Log.Debug("Config file not found, saving default")
+		log.Debug("Config file not found, saving default")
 		if err = viper.WriteConfigAs("config." + configType); err != nil {
-			utils.Log.WithField("error", err.Error()).Fatal("Can't save default config")
+			log.WithField("error", err.Error()).Fatal("Can't save default config")
 		}
 	}
 
 	level := strings.ToLower(viper.GetString("log_level"))
-	utils.Log = utils.NewLogger(utils.NameToLevel[level], &utils.LoggerConfig{
-		Dirname: viper.GetString("log_dir"),
-		Logname: viper.GetString("log_syntax"),
+	log.Log = log.NewLogger(log.GetLevelFromString(level), []log.Reporter{
+		cli.NewCli(),
+		file.NewFile(viper.GetString("log_dir"), viper.GetString("log_syntax")),
 	})
 }
 
 func Connect() {
 	caCert, err := ioutil.ReadFile(viper.GetString("certificate_path"))
 	if err != nil {
-		utils.Log.WithField("error", err.Error()).Fatal("Can't read pem file")
+		log.WithField("error", err.Error()).Fatal("Can't read pem file")
 		return
 	}
 
@@ -92,31 +94,31 @@ func Connect() {
 	for {
 		con, err := tls.Dial("tcp", viper.GetString("server_ip"), conf)
 		if err != nil {
-			utils.Log.WithField("ip", viper.GetString("server_ip")).WithError(err).Error("can't connect to server")
+			log.WithField("ip", viper.GetString("server_ip")).WithError(err).Error("can't connect to server")
 
-			utils.Log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
+			log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
 			time.Sleep(time.Second * time.Duration(viper.GetInt("interval")))
 			continue
 		}
-		utils.Log.WithField("IP", con.RemoteAddr().String()).Info("connected to the server")
+		log.WithField("IP", con.RemoteAddr().String()).Info("connected to the server")
 		conn = con
 
-		utils.Log.Info("Initializing the handshake")
+		log.Info("Initializing the handshake")
 		err = Handshake(conn)
 		if err != nil {
-			utils.Log.WithError(err).Error("handshake failed")
+			log.WithError(err).Error("handshake failed")
 
-			utils.Log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
+			log.Infof("failed to connect to server, trying again in %d seconds", viper.GetInt("interval"))
 			time.Sleep(time.Second * time.Duration(viper.GetInt("interval")))
 			continue
 		}
-		utils.Log.Info("Handshake successful")
+		log.Info("Handshake successful")
 
 		for {
 			r := bufio.NewReader(conn)
 			msg, err := r.ReadString('\n')
 			if err != nil {
-				utils.Log.WithField("error", err).Error("error reading TLS message")
+				log.WithField("error", err).Error("error reading TLS message")
 				break
 			}
 
@@ -137,7 +139,7 @@ func Connect() {
 
 			_, err = fmt.Fprintln(conn, data)
 			if err != nil {
-				utils.Log.WithError(err).Error("error writing TLS message")
+				log.WithError(err).Error("error writing TLS message")
 				continue
 			}
 		}

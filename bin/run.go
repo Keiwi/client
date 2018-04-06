@@ -1,17 +1,18 @@
 package main
 
 import (
-	"github.com/apex/log"
 	"github.com/keiwi/client"
-	"github.com/keiwi/utils"
+	"github.com/keiwi/utils/log"
+	"github.com/keiwi/utils/log/handlers/cli"
+	"github.com/keiwi/utils/log/handlers/file"
 )
 
 var Version string
 
 func main() {
-	utils.Log = utils.NewLogger(log.DebugLevel, &utils.LoggerConfig{
-		Dirname: "./logs",
-		Logname: "%date%_client.log",
+	log.Log = log.NewLogger(log.DEBUG, []log.Reporter{
+		cli.NewCli(),
+		file.NewFile("./logs", "%date%_client.log"),
 	})
 	client.Start()
 }
